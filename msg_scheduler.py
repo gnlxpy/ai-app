@@ -1,5 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from zoneinfo import ZoneInfo
+from config import settings
 from db import Db
 from msg_idiom import get_random_idiom, gen_msg
 from tg import send_tg_msg_to_all
@@ -21,8 +22,8 @@ def start_scheduler():
     scheduler.add_job(
         send_daily_idiom,
         "cron",
-        hour=19,
-        minute=11,
+        hour=int(settings.IDIOMS_SCHEDULE_TIME),
+        minute=0,
         id="daily_idiom",
         replace_existing=True,
         coalesce=True,
