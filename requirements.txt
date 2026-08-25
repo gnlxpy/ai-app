@@ -1,0 +1,7 @@
+anthropic>=1.0.0
+pydantic-settings>=2.15.0
+chromadb>=1.0.0
+socksio>=1.0.0
+pyTelegramBotAPI>=4.36.1
+sqlalchemy==2.0.52
+apscheduler==3.11.3
