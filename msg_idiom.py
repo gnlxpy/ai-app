@@ -1,4 +1,5 @@
-
+import re
+from pydantic import BaseModel, Field, model_validator
 import chromadb
 import random
 from config import settings
@@ -37,60 +38,157 @@ def get_random_idiom() -> str | bool:
     return idiom_texts[0], randint_str
 
 
-def get_answer(ai_msg: Message) -> str:
-    return "\n".join(
-        block.text
-        for block in ai_msg.content
-        if block.type == "text"
+def get_answer(message: Message) -> str:
+    """Извлекает текст ответа, аккуратно склеивая все text-блоки без лишних переносов.
+    :param message: Ответ Anthropic API.
+    :return: Итоговый текст без разрывов от citation-блоков.
+    """
+    # Склеиваем все text-блоки подряд БЕЗ разделителя,
+    # т.к. citations разбивают одну фразу на несколько блоков
+    parts = [block.text for block in message.content if block.type == "text"]
+    return "".join(parts)
+
+
+class IdiomPost(BaseModel):
+    hook: str = Field(
+        description=(
+            "1 цепляющая фраза-затравка, до 15 слов. "
+            "Добавь в начало ОДИН эмодзи, подходящий по настроению идиомы "
+            "(например 😅 для иронично-скептичных идиом, 🤞 для идиом про надежду)."
+        )
+    )
+    meaning: str = Field(description="Значение идиомы простым языком")
+    origin: str = Field(
+        description=(
+            "Происхождение идиомы. Указывай только то, что реально нашёл через web_search "
+            "и можешь связать с конкретным источником. НЕ используй обороты вида "
+            "'некоторые источники предполагают' или 'возможно, связано с...' — это "
+            "звучит как факт, но не проверяемо читателем. Если конкретное происхождение "
+            "не подтверждается поиском — прямо напиши: 'Точное происхождение идиомы "
+            "не задокументировано', без добавления сочинённых версий."
+        )
+    )
+    translation_ru: list[str] = Field(
+        description="Буквальный/словарный перевод идиомы, 1-2 варианта."
+    )
+    analogs_ru: list[str] = Field(
+        description=(
+            "ТОЛЬКО готовые русские идиомы/пословицы с похожим смыслом. "
+            "ЗАПРЕЩЕНО включать кальки или дословные переводы английской идиомы "
+            "(например, 'не задерживай дыхание' — это калька, а не аналог, "
+            "её включать нельзя, даже с пометкой 'калька, но прижилась'). "
+            "Если нашёл только 1 подходящий аналог — верни список из 1 элемента, "
+            "не добавляй слабые варианты ради количества. "
+            "Хорошие примеры для идиом про 'напрасно ждать/надеяться': "
+            "'как рак на горе свистнет', 'после дождичка в четверг', 'ждать у моря погоды'."
+        )
+    )
+    examples: list[dict[str, str]] = Field(
+        description="Список примеров: {'en': ..., 'ru': ..., 'comment': ...}"
+    )
+    teacher_tip: str = Field(
+        description=(
+            "Короткий методический совет для читателя. Обращайся на 'вы' "
+            "к подписчику Telegram-канала, НЕ используй слова 'студенты'/'учащиеся'."
+        )
+    )
+    cta: str = Field(
+        description=(
+            "Задание для самостоятельной практики: предложи составить своё "
+            "предложение с идиомой мысленно или письменно для себя. "
+            "НЕ проси делиться, писать в комментариях, отправлять куда-либо — "
+            "ответ никуда не отправляется, это просто упражнение на закрепление."
+        )
     )
 
+    @model_validator(mode="after")
+    def strip_all_strings(self) -> "IdiomPost":
+        """Убирает случайные пробелы/переносы по краям всех строковых полей —
+        модель иногда добавляет их внутри значений JSON.
+        """
+        self.hook = self.hook.strip()
+        self.meaning = self.meaning.strip()
+        self.origin = self.origin.strip()
+        self.teacher_tip = self.teacher_tip.strip()
+        self.cta = self.cta.strip()
+        self.translation_ru = [s.strip() for s in self.translation_ru]
+        self.analogs_ru = [s.strip() for s in self.analogs_ru]
+        self.examples = [{k: v.strip() for k, v in ex.items()} for ex in self.examples]
+        return self
 
-def gen_msg(idiom_text: str, model: str = default_model, max_tokens: int = 8000) -> Message:
-    messages = [
-        {
-            "role": "user",
-            "content": f"Расскажи о данной идиоме дня: {idiom_text}"
-        }
-    ]
+
+def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost:
+    """Генерирует структурированные данные об идиоме через Claude API.
+    :param idiom_text: Строка с идиомой, значением и примерами из БД.
+    :param model: Модель Claude.
+    :return: Валидированный объект IdiomPost.
+    """
     system_prompt = " ".join(
         [
             "Ты должен корректно переводить английские идиомы на русский язык и искать русские аналоги.",
-            "Ты можешь использовать веб-поиск. После поиска выполни задачу пользователя:",
-            "1) собери информацию об идиоме на английском языке;",
-            "2) переведи английскую идиому на русский язык;",
-            "3) найди русскоязычные аналоги идиомы по смыслу;",
-            "4) дай развёрнутый ответ как учитель английского.",
-            "Форматируй ответ только в Telegram HTML.",
-            "Используй только теги: <b>, <strong>, <i>, <em>, <u>, <s>, <code>, <pre>, <a>.",
-            "Не используй Markdown, таблицы и заголовки Markdown.",
-            "Ответ не должен превышать 3900 букв без учёта тегов.",
+            "Ты можешь использовать веб-поиск для проверки значения, происхождения и аналогов.",
+            "После поиска верни ТОЛЬКО валидный JSON по схеме ниже, без markdown-разметки,",
+            "без ```json, без пояснений до или после JSON.",
+            "Пиши связным текстом своими словами, не переноси обрывки цитат из источников.",
+            f"Схема: {IdiomPost.model_json_schema()}",
         ]
     )
 
     message = client.messages.create(
         model=model,
-        max_tokens=max_tokens,
-        messages=messages,
+        max_tokens=4000,
         system=system_prompt,
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 5,
-                "user_location": {
-                    "type": "approximate",
-                    "city": "Tbilisi",
-                    "timezone": "Asia/Tbilisi",
-                }
-            }
-        ]
-        )
+        messages=[{"role": "user", "content": f"Идиома: {idiom_text}"}],
+        tools=[{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 3,
+        }],
+    )
     print(message.usage)
-    message_text = get_answer(message)
-    
-    return message_text
+    raw_text = "".join(b.text for b in message.content if b.type == "text")
+    return IdiomPost.model_validate_json(raw_text)
 
 
-def prepare_and_send_idiom():
+def render_telegram_post(post: IdiomPost, idiom_title: str) -> str:
+    """Собирает финальный HTML-пост для Telegram из структурированных данных.
+    :param post: Валидированный объект с контентом.
+    :param idiom_title: Заголовок идиомы (англ.).
+    :return: Готовый HTML-текст с фиксированными эмодзи-заголовками и отступами.
+    """
+    examples_html = "\n\n".join(
+        f"<b>Пример {i}:</b>\n<i>{ex['en']}</i>\n{ex['ru']}\n<code>{ex['comment']}</code>"
+        for i, ex in enumerate(post.examples, start=1)
+    )
+    return "\n\n".join(
+        [
+            post.hook,
+            f"<b>📖 Идиома дня: {idiom_title}</b>",
+            f"<b>💭 Значение:</b> {post.meaning}",
+            f"<b>📜 Происхождение:</b> {post.origin}",
+            f"<b>🔄 Перевод:</b> {', '.join(post.translation_ru)}",
+            f"<b>🇷🇺 Аналоги:</b> {', '.join(post.analogs_ru)}",
+            f"<b>✍️ Примеры:</b>\n\n{examples_html}",
+            f"<b>💡 Совет:</b> {post.teacher_tip}",
+            f"<b>🎯 Задание:</b> {post.cta}",
+        ]
+    )
 
-    return 
+def get_idiom_title(idiom_eng: str) -> str:
+    pattern = r"Idiom:\s*(.*?);"
+    match = re.search(pattern, idiom_eng)
+    if not match:
+        return ''
+    extracted_text = match.group(1)
+    return extracted_text
+
+
+def gen_msg(idiom_eng: str) -> str:
+    idiom_title = get_idiom_title(idiom_eng)
+    idiom_post = gen_msg_structured(idiom_eng)
+    idiom_post_rendered = render_telegram_post(idiom_post, idiom_title)
+    return idiom_post_rendered
+
+
+if __name__ == '__main__':
+    pass
