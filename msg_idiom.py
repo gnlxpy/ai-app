@@ -6,6 +6,7 @@ from config import settings
 from anthropic import Anthropic
 from anthropic.types import Message
 from db import Db
+import html
 
 
 client = Anthropic(api_key=settings.ANTHROPIC_TOKEN)
@@ -47,6 +48,16 @@ def get_answer(message: Message) -> str:
     # т.к. citations разбивают одну фразу на несколько блоков
     parts = [block.text for block in message.content if block.type == "text"]
     return "".join(parts)
+
+
+def sanitize_field(text: str) -> str:
+    """Убирает HTML-теги, которые модель могла ошибочно добавить, и экранирует
+    оставшиеся спецсимволы (&, <, >), чтобы Telegram не пытался парсить их как разметку.
+    :param text: Сырой текст поля из ответа модели.
+    :return: Безопасный для parse_mode="HTML" текст без тегов модели.
+    """
+    without_tags = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+    return html.escape(without_tags, quote=False).strip()
 
 
 class IdiomPost(BaseModel):
@@ -102,18 +113,16 @@ class IdiomPost(BaseModel):
     )
 
     @model_validator(mode="after")
-    def strip_all_strings(self) -> "IdiomPost":
-        """Убирает случайные пробелы/переносы по краям всех строковых полей —
-        модель иногда добавляет их внутри значений JSON.
-        """
-        self.hook = self.hook.strip()
-        self.meaning = self.meaning.strip()
-        self.origin = self.origin.strip()
-        self.teacher_tip = self.teacher_tip.strip()
-        self.cta = self.cta.strip()
-        self.translation_ru = [s.strip() for s in self.translation_ru]
-        self.analogs_ru = [s.strip() for s in self.analogs_ru]
-        self.examples = [{k: v.strip() for k, v in ex.items()} for ex in self.examples]
+    def sanitize_fields(self) -> "IdiomPost":
+        """Убирает теги от модели и экранирует спецсимволы во всех текстовых полях."""
+        self.hook = sanitize_field(self.hook)
+        self.meaning = sanitize_field(self.meaning)
+        self.origin = sanitize_field(self.origin)
+        self.teacher_tip = sanitize_field(self.teacher_tip)
+        self.cta = sanitize_field(self.cta)
+        self.translation_ru = [sanitize_field(s) for s in self.translation_ru]
+        self.analogs_ru = [sanitize_field(s) for s in self.analogs_ru]
+        self.examples = [{k: sanitize_field(v) for k, v in ex.items()} for ex in self.examples]
         return self
 
 
@@ -129,6 +138,8 @@ def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost
             "Ты можешь использовать веб-поиск для проверки значения, происхождения и аналогов.",
             "После поиска верни ТОЛЬКО валидный JSON по схеме ниже, без markdown-разметки,",
             "без ```json, без пояснений до или после JSON.",
+            "Значения ВСЕХ полей — чистый текст без HTML-тегов и без разметки цитирования",
+            "(никаких <cite>, <a>, <b> и подобных внутри значений полей).",
             "Пиши связным текстом своими словами, не переноси обрывки цитат из источников.",
             f"Схема: {IdiomPost.model_json_schema()}",
         ]
@@ -156,23 +167,22 @@ def render_telegram_post(post: IdiomPost, idiom_title: str) -> str:
     :param idiom_title: Заголовок идиомы (англ.).
     :return: Готовый HTML-текст с фиксированными эмодзи-заголовками и отступами.
     """
+    safe_title = html.escape(idiom_title, quote=False)
     examples_html = "\n\n".join(
         f"<b>Пример {i}:</b>\n<i>{ex['en']}</i>\n{ex['ru']}\n<code>{ex['comment']}</code>"
         for i, ex in enumerate(post.examples, start=1)
     )
-    return "\n\n".join(
-        [
-            post.hook,
-            f"<b>📖 Идиома дня: {idiom_title}</b>",
-            f"<b>💭 Значение:</b> {post.meaning}",
-            f"<b>📜 Происхождение:</b> {post.origin}",
-            f"<b>🔄 Перевод:</b> {', '.join(post.translation_ru)}",
-            f"<b>🇷🇺 Аналоги:</b> {', '.join(post.analogs_ru)}",
-            f"<b>✍️ Примеры:</b>\n\n{examples_html}",
-            f"<b>💡 Совет:</b> {post.teacher_tip}",
-            f"<b>🎯 Задание:</b> {post.cta}",
-        ]
-    )
+    return "\n\n".join([
+        post.hook,
+        f"<b>📖 Идиома дня: {safe_title}</b>",
+        f"<b>💭 Значение:</b> {post.meaning}",
+        f"<b>📜 Происхождение:</b> {post.origin}",
+        f"<b>🔄 Перевод:</b> {', '.join(post.translation_ru)}",
+        f"<b>🇷🇺 Аналоги:</b> {', '.join(post.analogs_ru)}",
+        f"<b>✍️ Примеры:</b>\n\n{examples_html}",
+        f"<b>💡 Совет:</b> {post.teacher_tip}",
+        f"<b>🎯 Задание:</b> {post.cta}",
+    ])
 
 def get_idiom_title(idiom_eng: str) -> str:
     pattern = r"Idiom:\s*(.*?);"
