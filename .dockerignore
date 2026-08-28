@@ -6,3 +6,6 @@ __pycache__/
 .gitignore
 .DS_Store
 :memory:.ses
+raw-wiktextract-data.jsonl
+test.py
+docs/
