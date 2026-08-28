@@ -148,7 +148,7 @@ def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost
 
     message = client.messages.create(
         model=model,
-        max_tokens=4000,
+        max_tokens=6000,
         system=system_prompt,
         messages=[{"role": "user", "content": f"Идиома: {idiom_text}"}],
         tools=[{
