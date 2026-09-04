@@ -9,3 +9,4 @@ __pycache__/
 raw-wiktextract-data.jsonl
 test.py
 docs/
+test.json
