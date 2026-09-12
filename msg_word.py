@@ -214,7 +214,8 @@ def rank_meanings(word_raw: WordRaw, model: str = default_model) -> list[RawMean
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}],
     )
-    
+    print('rank_meanings', message.usage)
+
     answer_text = get_answer(message)
     clean_json = extract_json(answer_text)
     try:
@@ -335,6 +336,7 @@ def assemble_word_post(
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
+    print('assemble_word_post', message.usage)
     answer_text = get_answer(message)
     clean_json = extract_json(answer_text)
     response = MeaningCardsResponse.model_validate_json(clean_json)
