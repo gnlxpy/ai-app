@@ -1,171 +1,164 @@
-from pathlib import Path
+import json
 import re
-from datetime import datetime as dt, timedelta
-from sqlalchemy import Boolean, CheckConstraint, Integer, String, create_engine, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
-from sqlalchemy import DateTime
-from config import settings
+from ch import Ch
+import enum
 
 
-db_dir = Path(settings.CHROMA_PATH)
-db_dir.mkdir(parents=True, exist_ok=True)
-
-engine = create_engine(
-    f"sqlite:///{db_dir / 'app.sqlite3'}",
-    echo=False,
-)
-
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-class TgUser(Base):
-    __tablename__ = "tg_users"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        autoincrement=True,
-    )
-    tgid: Mapped[str] = mapped_column(
-        String(10),
-        unique=True,
-        nullable=False,
-    )
-    name: Mapped[str] = mapped_column(
-        String,
-        nullable=False,
-    )
-    status: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "length(tgid) BETWEEN 1 AND 10 "
-            "AND tgid NOT GLOB '*[^0-9]*'",
-            name="tgid_digits_max_10",
-        ),
-    )
-
-
-class IdiomsHistory(Base):
-    __tablename__ = "idioms_history"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        autoincrement=True,
-    )
-    datetime: Mapped[dt] = mapped_column(
-        DateTime,
-        nullable=False,
-        default=dt.now,
-    )
-    text: Mapped[str] = mapped_column(
-        String,
-        nullable=False,
-    )
+class Tables(enum.Enum):
+    USERS = 'users'
+    IDIOMS = 'idioms'
+    IDIOMS_HISTORY = 'idioms_history'
+    WORDS = 'words'
+    WORDS_HISTORY = 'words_history'
+    WORDS_EXAMPLES = 'words_examples_grouped'
+    WORDS_TRANSLATIONS = 'words_translations_grouped'
 
 
 class Db:
-    @staticmethod
-    def init_db() -> None:
-        Base.metadata.create_all(engine)
 
     @staticmethod
-    def create_user(tgid: int | str, name: str, status: bool = False) -> TgUser:
-        tgid_str = str(tgid)
-
-        if not re.fullmatch(r"\d{1,10}", tgid_str):
-            raise ValueError("tgid должен содержать от 1 до 10 цифр")
-
-        with SessionLocal() as session:
-            user = session.scalar(
-                select(TgUser).where(TgUser.tgid == tgid_str)
-            )
-
-            if user is not None:
-                user.name = name
-                user.status = status
-                session.commit()
-                session.refresh(user)
-                return user
-
-            user = TgUser(
-                tgid=tgid_str,
-                name=name,
-                status=status,
-            )
-            session.add(user)
-            session.commit()
-            session.refresh(user)
-            return user
+    def get_users_tg_ids() -> bool | list:
+        users_db = Ch.query('SELECT * FROM %(table)s FINAL WHERE status = true', {'table': Tables.USERS.value})
+        print(users_db)
+        if not isinstance(users_db, list):
+            return False
+        elif len(users_db) == 0:
+            return []
+        return [i['tgid'] for i in users_db]
 
     @staticmethod
-    def get_users_tg_ids() -> list[TgUser]:
-        with SessionLocal() as session:
-            result_raw = list(
-                session.scalars(
-                    select(TgUser).where(TgUser.status == True).order_by(TgUser.id)
-                ).all())
-            result = [row.tgid for row in result_raw]
-            return result
+    def create_user(tgid: str, name: str, status: bool = True):
+        users = Ch.query('SELECT * FROM %(table)s FINAL WHERE tgid = %(tgid)s;', {'table': Tables.USERS.value, 'tgid': tgid})
+        if users:
+            return False
+        r = Ch.insert(Tables.USERS.value, [[tgid, name, status]], ['tgid', 'name', 'status'])
+        return r
 
     @staticmethod
-    def update_user_status(tgid: int | str, status: bool) -> bool:
-        with SessionLocal() as session:
-            user = session.scalar(
-                select(TgUser).where(TgUser.tgid == str(tgid))
-            )
+    def update_user(tgid: int | str, status: bool):
+        users = Ch.query('SELECT * FROM %(table)s FINAL WHERE tgid = %(tgid)s;', {'table': Tables.USERS.value, 'tgid': tgid})
+        if not users:
+            return False
+        user_name = users[0]['name']
+        r = Ch.insert(Tables.USERS.value, [[tgid, user_name, status]], ['tgid', 'name', 'status'])
+        return r
 
-            if user is None:
+    @staticmethod
+    def get_idioms_history():
+        last_idiom_text = Ch.query('SELECT * FROM %(table)s ORDER BY date DESC LIMIT 1;' , {'table': Tables.IDIOMS_HISTORY.value})
+        if not last_idiom_text:
+            return False
+        return last_idiom_text[0]
+
+    @staticmethod
+    def insert_idioms_history(idiom: str, message: str):
+        r = Ch.insert(Tables.IDIOMS_HISTORY.value, [[idiom, message]], ['idiom', 'message'])
+        return r
+
+    @staticmethod
+    def get_random_idiom():
+        query = """
+SELECT idiom, meaning, examples
+FROM %(table)s
+WHERE idiom NOT IN (SELECT idiom FROM %(table2)s)
+ORDER BY rand()
+LIMIT 1;
+"""
+        idioms_list = Ch.query(query, {'table': Tables.IDIOMS.value, 'table2': Tables.IDIOMS_HISTORY.value})
+        if not idioms_list:
+            return False
+        return idioms_list[0]
+
+    @staticmethod
+    def get_idioms(word: str):
+        query = """
+SELECT idiom, meaning, examples
+FROM %(table)s
+WHERE match(idiom, %(pattern)s)
+LIMIT 10;
+"""
+        # \b — граница слова, (?i) — регистронезависимо;
+        # re.escape на случай спецсимволов, хотя word и так проходит
+        # валидацию regex'ом ^[a-zA-Z]{1,15}$ на уровне хендлера в main.py
+        pattern = rf"(?i)\b{re.escape(word)}\b"
+        idioms_list = Ch.query(query, {'table': Tables.IDIOMS.value, 'pattern': pattern})
+        if not idioms_list:
+            return False
+        return idioms_list
+
+    @staticmethod
+    def get_word_info(word: str):
+        tables_list = [
+            {'table': Tables.WORDS.value, 'result': None},
+            {'table': Tables.WORDS_EXAMPLES.value, 'result': None},
+            {'table': Tables.WORDS_TRANSLATIONS.value, 'result': None}
+        ]
+        for item in tables_list:
+            result = Ch.query("SELECT * FROM %(table)s WHERE word ILIKE %(word)s LIMIT 0, 10;", {'table': item['table'], 'word': word})
+            if not result:
                 return False
-
-            user.status = status
-            session.commit()
-            return True
+            item['result'] = result
+        return json.loads(tables_list)
 
     @staticmethod
-    def add_idiom(idiom_id: int, text: str) -> IdiomsHistory:
-        with SessionLocal() as session:
-            daily_text = IdiomsHistory(
-                id=idiom_id,
-                text=text,
-            )
-            session.add(daily_text)
-            session.commit()
-            session.refresh(daily_text)
-            return daily_text
+    def check_word(word: str):
+        result = Ch.query("SELECT word FROM %(table)s WHERE word ILIKE %(word)s LIMIT 0, 10;", {'table': Tables.WORDS.value, 'word': word})
+        if not result:
+            return False
+        return True
 
     @staticmethod
-    def get_today_idiom() -> str | None:
-        with SessionLocal() as session:
-            daily_text = session.scalar(
-                select(IdiomsHistory)
-                .order_by(IdiomsHistory.datetime.desc())
-            )
-
-            return daily_text.text if daily_text else None
+    def get_word_raw_data(word: str) -> dict | None:
+        """Собирает сырые данные по слову из 3 таблиц ClickHouse для fetch_word_raw.
+        
+        :param word: Слово для поиска.
+        :return: Словарь с ключами 'word_meta', 'examples', 'translations' или None.
+        """
+        # Получаем метаданные слова (транскрипции, аудио)
+        word_data = Ch.query(
+            "SELECT sounds_enpr, sounds_ipa, sounds_en_us_url, sounds_en_uk_url "
+            "FROM %(table)s WHERE word = %(word)s LIMIT 1;",
+            {'table': Tables.WORDS.value, 'word': word}
+        )
+        
+        if not word_data:
+            return None
+        
+        # Получаем примеры со значениями
+        examples_data = Ch.query(
+            "SELECT pos, meaning, examples, synonyms, antonyms "
+            "FROM %(table)s WHERE word = %(word)s;",
+            {'table': Tables.WORDS_EXAMPLES.value, 'word': word}
+        )
+        
+        if not examples_data:
+            return None
+        
+        # Получаем переводы
+        translations_data = Ch.query(
+            "SELECT pos, translate_ru, translate_uk, translate_ge "
+            "FROM %(table)s WHERE word = %(word)s;",
+            {'table': Tables.WORDS_TRANSLATIONS.value, 'word': word}
+        )
+        
+        # Если переводов нет, возвращаем пустой список
+        if not translations_data:
+            translations_data = []
+        
+        return {
+            'word_meta': word_data[0],  # Берём первую (единственную) строку
+            'examples': examples_data,
+            'translations': translations_data,
+        }
 
     @staticmethod
-    def get_idioms_ids():
-        with SessionLocal() as session:
-            result_raw = list(
-                session.scalars(
-                    select(IdiomsHistory)
-                ).all())
-            if not result_raw:
-                return False
-            result = [row.id for row in result_raw]
-            return result
+    def insert_words_history(word: str, message: str, idiom_button: bool):
+        r = Ch.insert(Tables.WORDS_HISTORY.value, [[word, message, idiom_button]], ['word', 'message', 'idiom_button'])
+        return r
 
-
-if __name__ == '__main__':
-    r = Db.get_idioms_ids()
-    print(r)
+    @staticmethod
+    def get_words_history(word: str):
+        word_history = Ch.query('SELECT * FROM %(table)s WHERE word = %(word)s LIMIT 1;' , {'table': Tables.WORDS_HISTORY.value, 'word': word})
+        if not word_history:
+            return False
+        return word_history[0]

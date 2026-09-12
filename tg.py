@@ -4,7 +4,7 @@ import telebot
 from config import settings
 
 
-bot = telebot.TeleBot(settings.TELEGRAM_TOKEN)
+bot = telebot.TeleBot(settings.TELEGRAM_TOKEN, threaded=True, num_threads=4)
 
 
 def send_tg_msg(tg_id: int | str, msg: str) -> bool:

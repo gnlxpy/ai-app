@@ -1,11 +1,8 @@
 import re
 from pydantic import BaseModel, Field, model_validator
-import chromadb
-import random
 from config import settings
 from anthropic import Anthropic
 from anthropic.types import Message
-from db import Db
 import html
 
 
@@ -13,41 +10,30 @@ client = Anthropic(api_key=settings.ANTHROPIC_TOKEN)
 default_model = "claude-sonnet-5"
 
 
-def get_uniq_randint(collection_count: int):
-    idioms_ids = Db.get_idioms_ids()
-    while True:
-        randint_str = str(random.randint(1, collection_count))
-        if randint_str in idioms_ids:
-            continue
-        else:
-            return randint_str
-
-
-def get_random_idiom() -> str | bool:
-    client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
-    collection = client.get_collection(
-        name=settings.IDIOMS_COLLECTION,
-    )
-    collection_count = collection.count()
-    randint_str = get_uniq_randint(collection_count)
-    idiom = collection.get(randint_str)
-    if not idiom:
-        return False
-    idiom_texts = idiom.get('documents')
-    if not idiom or not idiom_texts:
-        return False
-    return idiom_texts[0], randint_str
+def extract_json_block(text: str) -> str:
+    """Вырезает JSON-объект из текста, отбрасывая любые преамбулы модели
+    (например, комментарии перед вызовом web_search).
+    :param text: Склеенный текст всех text-блоков ответа модели.
+    :return: Подстрока от первой '{' до последней '}'.
+    :raises ValueError: если фигурные скобки не найдены.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(f"В ответе модели не найден JSON-объект: {text[:200]!r}")
+    return text[start : end + 1]
 
 
 def get_answer(message: Message) -> str:
-    """Извлекает текст ответа, аккуратно склеивая все text-блоки без лишних переносов.
+    """Извлекает и очищает JSON-текст ответа, отбрасывая преамбулы модели
+    (актуально при использовании web_search — модель может добавлять
+    комментарии в отдельных text-блоках до финального JSON).
     :param message: Ответ Anthropic API.
-    :return: Итоговый текст без разрывов от citation-блоков.
+    :return: Строка, содержащая только JSON-объект.
     """
-    # Склеиваем все text-блоки подряд БЕЗ разделителя,
-    # т.к. citations разбивают одну фразу на несколько блоков
     parts = [block.text for block in message.content if block.type == "text"]
-    return "".join(parts)
+    joined = "".join(parts)
+    return extract_json_block(joined)
 
 
 def sanitize_field(text: str) -> str:
@@ -126,7 +112,7 @@ class IdiomPost(BaseModel):
         return self
 
 
-def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost:
+def gen_msg_structured(idiom_dict: dict, model: str = default_model) -> IdiomPost:
     """Генерирует структурированные данные об идиоме через Claude API.
     :param idiom_text: Строка с идиомой, значением и примерами из БД.
     :param model: Модель Claude.
@@ -150,7 +136,7 @@ def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost
         model=model,
         max_tokens=6000,
         system=system_prompt,
-        messages=[{"role": "user", "content": f"Идиома: {idiom_text}"}],
+        messages=[{"role": "user", "content": f"Идиома: {idiom_dict['idiom']}, значение: {idiom_dict['meaning']}, примеры: {idiom_dict['examples']}"}],
         tools=[{
             "type": "web_search_20250305",
             "name": "web_search",
@@ -158,24 +144,28 @@ def gen_msg_structured(idiom_text: str, model: str = default_model) -> IdiomPost
         }],
     )
     print(message.usage)
-    raw_text = "".join(b.text for b in message.content if b.type == "text")
-    return IdiomPost.model_validate_json(raw_text)
+    try:
+        json_str = get_answer(message)
+        print('json_str\n', json_str)
+        return IdiomPost.model_validate_json(json_str)
+    except Exception as e:
+        print(f"Не удалось распарсить ответ модели: {e}")
+        raise
 
 
-def render_telegram_post(post: IdiomPost, idiom_title: str) -> str:
+def render_telegram_post(post: IdiomPost, idiom_dict: dict) -> str:
     """Собирает финальный HTML-пост для Telegram из структурированных данных.
     :param post: Валидированный объект с контентом.
     :param idiom_title: Заголовок идиомы (англ.).
     :return: Готовый HTML-текст с фиксированными эмодзи-заголовками и отступами.
     """
-    safe_title = html.escape(idiom_title, quote=False)
     examples_html = "\n\n".join(
         f"<b>Пример {i}:</b>\n<i>{ex['en']}</i>\n{ex['ru']}\n<code>{ex['comment']}</code>"
         for i, ex in enumerate(post.examples, start=1)
     )
     return "\n\n".join([
         post.hook,
-        f"<b>📖 Идиома дня: {safe_title}</b>",
+        f"<b>📖 Идиома дня: {idiom_dict['idiom']}</b>",
         f"<b>💭 Значение:</b> {post.meaning}",
         f"<b>📜 Происхождение:</b> {post.origin}",
         f"<b>🔄 Перевод:</b> {', '.join(post.translation_ru)}",
@@ -185,19 +175,10 @@ def render_telegram_post(post: IdiomPost, idiom_title: str) -> str:
         f"<b>🎯 Задание:</b> {post.cta}",
     ])
 
-def get_idiom_title(idiom_eng: str) -> str:
-    pattern = r"Idiom:\s*(.*?);"
-    match = re.search(pattern, idiom_eng)
-    if not match:
-        return ''
-    extracted_text = match.group(1)
-    return extracted_text
 
-
-def gen_msg(idiom_eng: str) -> str:
-    idiom_title = get_idiom_title(idiom_eng)
-    idiom_post = gen_msg_structured(idiom_eng)
-    idiom_post_rendered = render_telegram_post(idiom_post, idiom_title)
+def gen_msg_idiom(idiom_dict: dict) -> str:
+    idiom_post = gen_msg_structured(idiom_dict)
+    idiom_post_rendered = render_telegram_post(idiom_post, idiom_dict)
     return idiom_post_rendered
 
 

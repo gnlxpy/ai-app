@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Any, Sequence
 import clickhouse_connect
 from config import settings
 import certifi
@@ -27,9 +27,9 @@ class Ch:
             return False
 
     @staticmethod
-    def query(query: str) -> list[dict] | bool:
+    def query(query: str, parameters: dict[str, Any] | None = None) -> list[dict] | bool:
         try:
-            result = client.query(query)
+            result = client.query(query, parameters=parameters)
             return [
                 dict(zip(result.column_names, row))
                 for row in result.result_rows
@@ -39,9 +39,9 @@ class Ch:
             return False
 
     @staticmethod
-    def insert(table: str, data: list[dict]) -> QuerySummary | bool:
+    def insert(table: str, data: list[list], column_names: list | None = None) -> QuerySummary | bool:
         try:
-            result = client.insert(table, data).written_rows
+            result = client.insert(table, data,  column_names).written_rows
             return result
         except Exception as e:
             print(f"Error inserting data: {e}")

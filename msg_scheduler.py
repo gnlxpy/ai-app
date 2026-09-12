@@ -2,18 +2,23 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from zoneinfo import ZoneInfo
 from config import settings
 from db import Db
-from msg_idiom import get_random_idiom, gen_msg
+from msg_idiom import gen_msg_idiom
 from tg import send_tg_msg_to_all
 
 
-def send_daily_idiom():
-    idiom_eng_text, randint_str = get_random_idiom()
-    idiom_result_text = gen_msg(idiom_eng_text)
-    Db.add_idiom(int(randint_str), idiom_result_text)
+def send_daily_idiom() -> bool:
+    idiom_dict = Db.get_random_idiom()
+    if not idiom_dict:
+        return False
+    idiom_result_text = gen_msg_idiom(idiom_dict)
     if not idiom_result_text:
         return False
+    Db.insert_idioms_history(idiom_dict['idiom'], idiom_result_text)
     tg_ids = Db.get_users_tg_ids()
+    if not tg_ids:
+        return False
     status_send = send_tg_msg_to_all(idiom_result_text, tg_ids)
+    status_send = True
     return status_send
 
 
