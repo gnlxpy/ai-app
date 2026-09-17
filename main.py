@@ -130,7 +130,7 @@ def send_welcome(message: Message):
 @rate_limit
 def send_msg_word(message: Message):
     idiom_button_word = None
-    history_word = Db.get_words_history(message.text.lower())
+    history_word = Db.get_words_history(message.text)
     if history_word:
         if history_word['idiom_button']:
             idiom_button_word = message.text
@@ -146,6 +146,7 @@ def send_msg_word(message: Message):
     if not check_word:
         bot.send_message(message.chat.id, "Такого слова еще нет...")
         return
+    bot.send_message(message.chat.id, "Ищу...")
     rendered_post, idiom_button = gen_msg_word(message.text)
     if idiom_button:
         idiom_button_word = message.text
@@ -158,7 +159,7 @@ def send_msg_word(message: Message):
         parse_mode="HTML",
         reply_markup=build_word_keyboard(idiom_button_word)
     )
-    Db.insert_words_history(message.text.lower(), rendered_post, True if idiom_button else False)
+    Db.insert_words_history(message.text, rendered_post, True if idiom_button else False)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(BotAction.WORD_SHOW_IDIOMS.value))
